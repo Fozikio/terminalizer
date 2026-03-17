@@ -27,7 +27,7 @@ di.require('axios');
 di.require('death');
 di.require('path');
 di.require('os');
-di.require('electron');
+di.set('playwright', require('playwright-core'));
 di.require('deepmerge');
 di.require('uuid');
 di.require('tmp');
@@ -73,6 +73,7 @@ yargs.command(commands.init)
      .command(commands.render)
      .command(commands.share)
      .command(commands.generate)
+     .command(commands.script)
 
 debugger;
 
