@@ -183,7 +183,7 @@ function mergeFrames(records, options, frameDimensions) {
   return new Promise(function (resolve, reject) {
     // The number of frames
     var framesCount = records.length;
-    
+
     // Track execution time
     var start = Date.now();
 
@@ -196,22 +196,22 @@ function mergeFrames(records, options, frameDimensions) {
       Math.ceil(framesCount / options.step)
     );
 
-    // The gif image
-    var gif = new di.GIFEncoder(frameDimensions.width, frameDimensions.height, {
-      highWaterMark: 5 * 1024 * 1024,
-    });
+    // gifenc API
+    var GIFEncoder = di.gifenc.GIFEncoder;
+    var quantize = di.gifenc.quantize;
+    var applyPalette = di.gifenc.applyPalette;
 
-    // Pipe
-    gif.pipe(di.fs.createWriteStream(options.outputFile));
+    // Map quality (1-100) to palette size (8-256).
+    // Higher quality = more colors = larger palette.
+    var paletteSize = Math.max(8, Math.round((options.quality / 100) * 256));
+    // Round down to nearest power of 2 (gifenc requires power-of-2 palette sizes)
+    paletteSize = Math.pow(2, Math.floor(Math.log2(paletteSize)));
 
-    // Quality
-    gif.setQuality(101 - options.quality);
+    // repeat: -1 = play once (0 loops), 0 = loop forever, N = loop N times
+    // gifenc uses repeat=0 for infinite, repeat=N for N repetitions
+    var repeat = options.repeat === -1 ? -1 : options.repeat;
 
-    // Repeat
-    gif.setRepeat(options.repeat);
-
-    // Write the headers
-    gif.writeHeader();
+    var gif = GIFEncoder();
 
     di.async.eachOfSeries(
       records,
@@ -231,13 +231,19 @@ function mergeFrames(records, options, frameDimensions) {
           .then(function (png) {
             progressBar.tick();
 
-            // Set the duration (the delay of the next frame)
-            // The % is used to take the delay of the first frame
-            // as the duration of the last frame
-            gif.setDelay(records[(index + 1) % framesCount].delay);
+            // The delay of the next frame (% wraps last frame back to first)
+            var delay = records[(index + 1) % framesCount].delay;
 
-            // Add frames
-            gif.addFrame(png.data);
+            // quantize expects a flat Uint8Array of RGBA pixels
+            var rgba = new Uint8Array(png.data.buffer, png.data.byteOffset, png.data.byteLength);
+            var palette = quantize(rgba, paletteSize);
+            var indexed = applyPalette(rgba, palette);
+
+            gif.writeFrame(indexed, frameDimensions.width, frameDimensions.height, {
+              palette: palette,
+              delay: delay,
+              repeat: repeat,
+            });
 
             // Next
             callback();
@@ -251,8 +257,10 @@ function mergeFrames(records, options, frameDimensions) {
           return reject(error);
         }
 
-        // Write the footer
         gif.finish();
+
+        // Write the GIF bytes to disk
+        di.fs.writeFileSync(options.outputFile, Buffer.from(gif.bytes()));
 
         // Finish
         console.log(di.chalk.green('[merge] Process successfully completed in ' + (Date.now() - start) + 'ms.'));

@@ -38,7 +38,7 @@ di.require('performance-now', 'now');
 di.require('async-promises', 'asyncPromises');
 di.require('string-argv', 'stringArgv');
 di.require('progress', 'ProgressBar');
-di.require('gif-encoder', 'GIFEncoder');
+di.set('gifenc', require('gifenc'));
 di.require('inquirer');
 
 di.set('pty', require('@homebridge/node-pty-prebuilt-multiarch'));

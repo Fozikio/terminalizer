@@ -50,7 +50,7 @@
     "deepmerge": "^2.2.1",
     "electron": "^25.2.0",
     "fs-extra": "^5.0.0",
-    "gif-encoder": "^0.6.1",
+    "gifenc": "^1.0.3",
     "inquirer": "^6.5.2",
     "js-yaml": "^3.13.1",
     "lodash": "^4.17.15",
