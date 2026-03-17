@@ -13,23 +13,16 @@ import 'terminalizer-player/dist/css/terminalizer.min.css';
 import 'xterm/dist/xterm.css';
 
 /**
- * Used for the step option
- * @type {Number}
+ * Whether we are running under Playwright (no Electron IPC available)
+ * @type {Boolean}
  */
-var stepsCounter = 0;
-
-/**
- * Rendering options
- */
-var options = {};
+var isPlaywright = typeof window.app === 'undefined';
 
 /**
  * A callback function for the event:
  * When the document is loaded
  */
 $(document).ready(async () => {
-  options = await app.getOptions();
-
   // Initialize the terminalizer plugin
   $('#terminal').terminalizer({
     recordingFile: 'data.json',
@@ -59,12 +52,61 @@ $(document).ready(async () => {
     terminalizer._terminal.reset();
 
     // When the terminal's reset is done
-    $('#terminal').one('rendered', render);
+    $('#terminal').one('rendered', function () {
+      if (isPlaywright) {
+        // Playwright mode: expose frame control API, signal ready
+        exposePlaywrightAPI();
+        window.__terminizerReady = true;
+      } else {
+        // Electron mode: run the original capture loop
+        render();
+      }
+    });
   });
 });
 
 /**
- * Render each frame and capture it
+ * Expose frame control API on window for Playwright to call
+ */
+function exposePlaywrightAPI() {
+  var terminalizer = $('#terminal').data('terminalizer');
+
+  /**
+   * Render a specific frame index
+   * Returns a Promise that resolves when the frame is rendered
+   *
+   * @param {Number} frameIndex
+   * @return {Promise}
+   */
+  window.renderFrame = function (frameIndex) {
+    return new Promise(function (resolve) {
+      terminalizer._renderFrame(frameIndex, true, resolve);
+    });
+  };
+
+  /**
+   * Get the total number of frames
+   *
+   * @return {Number}
+   */
+  window.getFrameCount = function () {
+    return terminalizer.getFramesCount();
+  };
+
+  /**
+   * Get the terminal element bounding rect
+   *
+   * @return {Object} {x, y, width, height}
+   */
+  window.getTerminalRect = function () {
+    var el = document.getElementById('terminal');
+    var rect = el.getBoundingClientRect();
+    return { x: Math.round(rect.left), y: Math.round(rect.top), width: Math.round(rect.width), height: Math.round(rect.height) };
+  };
+}
+
+/**
+ * Render each frame and capture it (Electron mode only)
  */
 function render() {
   var terminalizer = $('#terminal').data('terminalizer');
@@ -75,7 +117,7 @@ function render() {
     framesCount,
     function (frameIndex, next) {
       terminalizer._renderFrame(frameIndex, true, function () {
-        capture(frameIndex, next);
+        captureElectron(frameIndex, next);
       });
     },
     function (error) {
@@ -89,22 +131,15 @@ function render() {
 }
 
 /**
- * Capture the current frame
+ * Capture the current frame via Electron IPC
  *
  * @param {Number}   frameIndex
  * @param {Function} callback
  */
-function capture(frameIndex, callback) {
+function captureElectron(frameIndex, callback) {
   var width = $('#terminal').width();
   var height = $('#terminal').height();
   var captureRect = { x: 0, y: 0, width: width, height: height };
-
-  if (stepsCounter != 0) {
-    stepsCounter = (stepsCounter + 1) % options.step;
-    return callback();
-  }
-
-  stepsCounter = (stepsCounter + 1) % options.step;
 
   app
     .capturePage(captureRect, frameIndex)

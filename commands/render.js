@@ -10,11 +10,6 @@ const tmp = require('tmp');
 tmp.setGracefulCleanup();
 
 /**
- * The directory to render the frames into
- */
-var renderDir = tmp.dirSync({ unsafeCleanup: true }).name;
-
-/**
  * Create a progress bar for processing frames
  *
  * @param  {String}      operation   a name for the operation
@@ -59,6 +54,24 @@ function writeRecordingData(recordingFile) {
 }
 
 /**
+ * Parse a PNG Buffer into a pngjs PNG object
+ *
+ * @param  {Buffer}  buffer
+ * @return {Promise} resolve with the parsed PNG image
+ */
+function parsePNGBuffer(buffer) {
+  return new Promise(function (resolve, reject) {
+    new di.PNG().parse(buffer, function (error, data) {
+      if (error) {
+        return reject(error);
+      }
+
+      resolve(data);
+    });
+  });
+}
+
+/**
  * Read and parse a PNG image file
  *
  * @param  {String}  path the absolute path of the image
@@ -83,90 +96,92 @@ function loadPNG(path) {
 }
 
 /**
- * Get the dimensions of the first rendered frame
- *
- * @return {Promise}
- */
-function getFrameDimensions() {
-  // The path of the first rendered frame
-  var framePath = di.path.join(renderDir, "0.png");
-
-  // Read and parse a PNG image file
-  return loadPNG(framePath).then(function (png) {
-    return {
-      width: png.width,
-      height: png.height,
-    };
-  });
-}
-/**
- * Render the frames into PNG images
+ * Render the frames into PNG images using Playwright
  *
  * @param  {Array}   records [{delay, content}, ...]
  * @param  {Object}  options {step}
- * @return {Promise}
+ * @return {Promise} resolves with an Array of PNG Buffers indexed by record position (null for skipped frames)
  */
-function renderFrames(records, options) {
-  return new Promise(function (resolve, reject) {
-    // The number of frames
-    var framesCount = records.length;
+async function renderFrames(records, options) {
+  var framesCount = records.length;
+  var start = Date.now();
 
-    // Track execution time
-    var start = Date.now();
+  var progressBar = getProgressBar(
+    "Rendering",
+    Math.ceil(framesCount / options.step)
+  );
 
-    // Create a progress bar
-    var progressBar = getProgressBar(
-      "Rendering",
-      Math.ceil(framesCount / options.step)
-    );
+  var { chromium } = di.playwright;
+  var browser = await chromium.launch({ headless: true });
 
-    // Execute the rendering process
-    var render = di.spawn(
-      di.electron,
-      [di.path.join(ROOT_PATH, "render/index.js"), renderDir, options.step,],
-      { detached: false }
-    );
+  try {
+    var page = await browser.newPage();
 
-    render.stdout.on('data', onData);
-    render.stderr.on('data', onError);
-    render.on('close', onClose); 
+    // Viewport large enough for any terminal size
+    await page.setViewportSize({ width: 8000, height: 8000 });
 
-    // Track progress of rendering through stdout
-    function onData(data) {
+    // Load the renderer HTML (same file Electron used)
+    var indexHtmlPath = di.path.join(ROOT_PATH, 'render/index.html').replace(/\\/g, '/');
+    await page.goto('file:///' + indexHtmlPath);
 
-      // Is not a recordIndex (to skip Electron's logs or new lines)
-      if (isNaN(parseInt(data.toString()))) {
-        return;
+    // Wait for the Playwright frame API to be ready (set by app.js once terminal reset is done)
+    await page.waitForFunction('window.__terminizerReady === true', { timeout: 30000 });
+
+    var frameCount = await page.evaluate('window.getFrameCount()');
+    var terminalRect = await page.evaluate('window.getTerminalRect()');
+
+    // Array indexed by record position; null for skipped (step) frames
+    var frameBuffers = new Array(framesCount).fill(null);
+
+    var stepsCounter = 0;
+
+    for (var i = 0; i < frameCount; i++) {
+      if (stepsCounter !== 0) {
+        stepsCounter = (stepsCounter + 1) % options.step;
+        continue;
       }
 
+      stepsCounter = (stepsCounter + 1) % options.step;
+
+      // Ask the player to render this frame
+      await page.evaluate('window.renderFrame(' + i + ')');
+
+      // Capture only the terminal element area — returns a Buffer
+      var screenshot = await page.screenshot({
+        clip: terminalRect,
+        type: 'png',
+      });
+
+      frameBuffers[i] = screenshot;
       progressBar.tick();
     }
 
-    // Track rendering errors observed on stderr
-    function onError(error) {
+    console.log(di.chalk.green('[render] Process successfully completed in ' + (Date.now() - start) + 'ms.'));
 
-      // If error is Buffer, print it, otherwise reject
-      if (!!error && error instanceof Buffer) {
-        console.log(di.chalk.yellow(`[render] ${error.toString('utf8').trim()}`));
-      } else {
-        render.kill();
-        reject(new Error("Unknown error [" + typeof error + "]: " + error));
-      }
-    } 
+    return frameBuffers;
+  } finally {
+    await browser.close();
+  }
+}
 
-    // React when rendering process finishes
-    function onClose(code) {
-      if (code !== 0) {
-        reject(new Error("Rendering exited with code " + code));
-      } else {
-        if (progressBar.complete) {
-          console.log(di.chalk.green('[render] Process successfully completed in ' + (Date.now() - start) + 'ms.'));
-        } else {
-          console.log(di.chalk.yellow('[render] Process completion unverified'));
-        }
+/**
+ * Get the dimensions from the first non-null frame Buffer
+ *
+ * @param  {Array}   frameBuffers array of PNG Buffers (may contain nulls for skipped frames)
+ * @return {Promise} resolves with {width, height}
+ */
+function getFrameDimensions(frameBuffers) {
+  // Find the first captured frame
+  var firstBuffer = frameBuffers.find(function (b) { return b !== null; });
 
-        resolve();
-      }
+  if (!firstBuffer) {
+    return Promise.reject(new Error('No frames were rendered'));
+  }
+
+  return parsePNGBuffer(firstBuffer).then(function (png) {
+    return {
+      width: png.width,
+      height: png.height,
     };
   });
 }
@@ -176,10 +191,11 @@ function renderFrames(records, options) {
  *
  * @param  {Array}   records         [{delay, content}, ...]
  * @param  {Object}  options         {quality, repeat, step, outputFile}
+ * @param  {Array}   frameBuffers    array of PNG Buffers indexed by record position (null for skipped)
  * @param  {Object}  frameDimensions {width, height}
  * @return {Promise}
  */
-function mergeFrames(records, options, frameDimensions) {
+function mergeFrames(records, options, frameBuffers, frameDimensions) {
   return new Promise(function (resolve, reject) {
     // The number of frames
     var framesCount = records.length;
@@ -208,7 +224,6 @@ function mergeFrames(records, options, frameDimensions) {
     paletteSize = Math.pow(2, Math.floor(Math.log2(paletteSize)));
 
     // repeat: -1 = play once (0 loops), 0 = loop forever, N = loop N times
-    // gifenc uses repeat=0 for infinite, repeat=N for N repetitions
     var repeat = options.repeat === -1 ? -1 : options.repeat;
 
     var gif = GIFEncoder();
@@ -223,11 +238,10 @@ function mergeFrames(records, options, frameDimensions) {
 
         stepsCounter = (stepsCounter + 1) % options.step;
 
-        // The path of the rendered frame
-        var framePath = di.path.join(renderDir, index + ".png");
+        var frameBuffer = frameBuffers[index];
 
-        // Read and parse the rendered frame
-        loadPNG(framePath)
+        // Parse from Buffer (in-memory, no disk read needed)
+        parsePNGBuffer(frameBuffer)
           .then(function (png) {
             progressBar.tick();
 
@@ -271,23 +285,6 @@ function mergeFrames(records, options, frameDimensions) {
 }
 
 /**
- * Delete the temporary rendered PNG images
- *
- * @return {Promise}
- */
-function cleanup() {
-  return new Promise(function (resolve, reject) {
-    di.fs.emptyDir(di.path.join(ROOT_PATH, "render/frames"), function (error) {
-      if (error) {
-        return reject(error);
-      }
-
-      resolve();
-    });
-  });
-}
-
-/**
  * Executed after the command completes its task
  *
  * @param {String} outputFile the path of the rendered image
@@ -308,9 +305,6 @@ function command(argv) {
   // Frames
   var records = argv.recordingFile.json.records;
   var config = argv.recordingFile.json.config;
-
-  // Number of frames in the recording file
-  var framesCount = records.length;
 
   // The path of the output file
   var outputFile = di.utility.resolveFilePath(
@@ -348,17 +342,21 @@ function command(argv) {
     mergingOptions.outputFile = argv.output;
   }
 
+  // frameBuffers is produced by renderFrames and threaded through the waterfall
+  var frameBuffers = null;
+
   // Tasks
   di.asyncPromises
     .waterfall([
-      // Remove all previously rendered frames
-      cleanup,
-
-      // Write the recording data into render/data.json
+      // Write the recording data into render/data.json (needed by the browser renderer)
       di._.partial(writeRecordingData, argv.recordingFile),
 
-      // Render the frames into PNG images
-      di._.partial(renderFrames, records, renderingOptions),
+      // Render the frames into PNG Buffers via Playwright
+      function () {
+        return renderFrames(records, renderingOptions).then(function (buffers) {
+          frameBuffers = buffers;
+        });
+      },
 
       // Adjust frames delays
       di._.partial(
@@ -367,14 +365,15 @@ function command(argv) {
         adjustFramesDelaysOptions
       ),
 
-      // Get the dimensions of the first rendered frame
-      di._.partial(getFrameDimensions),
+      // Get the dimensions of the first rendered frame Buffer
+      function () {
+        return getFrameDimensions(frameBuffers);
+      },
 
       // Merge the rendered frames into an animated GIF image
-      di._.partial(mergeFrames, records, mergingOptions),
-
-      // Delete the temporary rendered PNG images
-      cleanup,
+      function (frameDimensions) {
+        return mergeFrames(records, mergingOptions, frameBuffers, frameDimensions);
+      },
     ])
     .then(function () {
       done(outputFile);
