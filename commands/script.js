@@ -183,8 +183,11 @@ function command(argv) {
     outputPath = outputPath + '.yml';
   }
 
-  // Use config from the script file, or fall back to terminalizer defaults
-  var configSection = scriptData.config || di.utility.getDefaultConfig().raw;
+  // Merge script config with terminalizer defaults so all required fields exist
+  var defaultConfig = di.utility.getDefaultConfig().json;
+  var scriptConfig = scriptData.config || {};
+  var mergedConfig = di.deepmerge(defaultConfig, scriptConfig);
+  var configSection = mergedConfig;
 
   // Generate record frames from scenes
   var records = scenesToRecords(scriptData.scenes);

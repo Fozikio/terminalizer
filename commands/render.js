@@ -112,7 +112,22 @@ async function renderFrames(records, options) {
   );
 
   var { chromium } = di.playwright;
-  var browser = await chromium.launch({ headless: true });
+  var browser = await chromium.launch({ headless: true, args: ['--allow-file-access-from-files'] });
+
+  // Serve the render directory via HTTP to avoid file:// CORS issues with Ajax
+  var http = require('http');
+  var handler = require('serve-handler');
+  var renderDir = di.path.join(ROOT_PATH, 'render');
+
+  var server = await new Promise(function (resolve) {
+    var srv = http.createServer(function (req, res) {
+      return handler(req, res, { public: renderDir });
+    });
+    srv.listen(0, '127.0.0.1', function () {
+      resolve(srv);
+    });
+  });
+  var port = server.address().port;
 
   try {
     var page = await browser.newPage();
@@ -120,9 +135,12 @@ async function renderFrames(records, options) {
     // Viewport large enough for any terminal size
     await page.setViewportSize({ width: 8000, height: 8000 });
 
-    // Load the renderer HTML (same file Electron used)
-    var indexHtmlPath = di.path.join(ROOT_PATH, 'render/index.html').replace(/\\/g, '/');
-    await page.goto('file:///' + indexHtmlPath);
+    // Capture console logs for debugging
+    page.on('console', function (msg) { console.error('[browser]', msg.text()); });
+    page.on('pageerror', function (err) { console.error('[browser error]', err.message); });
+
+    // Load the renderer HTML via HTTP (avoids file:// CORS issues with data.json)
+    await page.goto('http://127.0.0.1:' + port + '/index.html');
 
     // Wait for the Playwright frame API to be ready (set by app.js once terminal reset is done)
     await page.waitForFunction('window.__terminizerReady === true', { timeout: 30000 });
@@ -161,6 +179,7 @@ async function renderFrames(records, options) {
     return frameBuffers;
   } finally {
     await browser.close();
+    server.close();
   }
 }
 

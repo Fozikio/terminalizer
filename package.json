@@ -58,6 +58,7 @@
     "pngjs": "^3.4.0",
     "progress": "^2.0.3",
     "require-dir": "^1.1.0",
+    "serve-handler": "^6.1.7",
     "string-argv": "0.0.2",
     "tmp": "^0.2.1",
     "uuid": "^10.0.0",
