@@ -69,18 +69,33 @@ function scenesToRecords(scenes) {
 
     if (type === 'command') {
 
-      var prompt    = scene.prompt      || DEFAULTS.prompt;
-      var speed     = scene.typingSpeed || DEFAULTS.typingSpeed;
-      var rand      = (scene.randomness !== undefined) ? scene.randomness : DEFAULTS.randomness;
-      var postDelay = (scene.postDelay  !== undefined) ? scene.postDelay  : DEFAULTS.postDelay;
-      var text      = scene.text || '';
+      var prompt     = scene.prompt      || DEFAULTS.prompt;
+      var speed      = scene.typingSpeed || DEFAULTS.typingSpeed;
+      var rand       = (scene.randomness !== undefined) ? scene.randomness : DEFAULTS.randomness;
+      var postDelay  = (scene.postDelay  !== undefined) ? scene.postDelay  : DEFAULTS.postDelay;
+      var preDelay   = (scene.preDelay   !== undefined) ? scene.preDelay   : 400;
+      var text       = scene.text || '';
 
-      // Emit the prompt as a single frame
-      records.push({ delay: 200, content: prompt });
+      // Breathing room before prompt appears
+      records.push({ delay: preDelay, content: prompt });
 
-      // Emit each character with realistic per-character timing
+      // Emit each character with natural typing rhythm
       for (var i = 0; i < text.length; i++) {
-        records.push({ delay: withJitter(speed, rand), content: text[i] });
+        var ch = text[i];
+        var charDelay = speed;
+
+        // Pause slightly longer after spaces (like a real typist between words)
+        if (ch === ' ') {
+          charDelay = speed * 1.8;
+        // Slow down on symbols and punctuation
+        } else if (/[^a-zA-Z0-9]/.test(ch)) {
+          charDelay = speed * 1.4;
+        // Slightly faster on common letters
+        } else if (/[etaoins]/.test(ch)) {
+          charDelay = speed * 0.85;
+        }
+
+        records.push({ delay: withJitter(Math.round(charDelay), rand), content: ch });
       }
 
       // Enter key frame followed by postDelay pause
@@ -88,10 +103,28 @@ function scenesToRecords(scenes) {
 
     } else if (type === 'output') {
 
-      var postDelay = (scene.postDelay !== undefined) ? scene.postDelay : 2000;
-      var content   = (scene.content || '').replace(/\n/g, '\r\n');
+      var postDelay  = (scene.postDelay  !== undefined) ? scene.postDelay  : 2000;
+      var reveal     = scene.reveal || false;
+      var revealDelay = scene.revealDelay || 80;
+      var content    = (scene.content || '').replace(/\n/g, '\r\n');
 
-      records.push({ delay: postDelay, content: content });
+      if (reveal) {
+        // Reveal line by line with staggered timing
+        var lines = content.split('\r\n');
+        for (var li = 0; li < lines.length; li++) {
+          var lineContent = lines[li] + (li < lines.length - 1 ? '\r\n' : '');
+          if (lineContent === '\r\n' || lineContent === '') {
+            // Empty lines appear faster
+            records.push({ delay: Math.round(revealDelay * 0.4), content: lineContent });
+          } else {
+            records.push({ delay: withJitter(revealDelay, Math.round(revealDelay * 0.3)), content: lineContent });
+          }
+        }
+        // Hold after full reveal (use invisible char — empty content can stall the player)
+        records.push({ delay: postDelay, content: '\x1b[0m' });
+      } else {
+        records.push({ delay: postDelay, content: content });
+      }
 
     } else if (type === 'run') {
 
@@ -104,7 +137,7 @@ function scenesToRecords(scenes) {
     } else if (type === 'wait') {
 
       var duration = scene.duration || 1000;
-      records.push({ delay: duration, content: '' });
+      records.push({ delay: duration, content: '\x1b[0m' });
 
     } else if (type === 'clear') {
 

@@ -143,10 +143,13 @@ async function renderFrames(records, options) {
     await page.goto('http://127.0.0.1:' + port + '/index.html');
 
     // Wait for the Playwright frame API to be ready (set by app.js once terminal reset is done)
+    console.error('[render] Waiting for terminal to initialize...');
     await page.waitForFunction('window.__terminizerReady === true', { timeout: 30000 });
+    console.error('[render] Terminal ready');
 
     var frameCount = await page.evaluate('window.getFrameCount()');
     var terminalRect = await page.evaluate('window.getTerminalRect()');
+    console.error('[render] Frames: ' + frameCount + ', Rect: ' + JSON.stringify(terminalRect));
 
     // Array indexed by record position; null for skipped (step) frames
     var frameBuffers = new Array(framesCount).fill(null);
@@ -161,8 +164,9 @@ async function renderFrames(records, options) {
 
       stepsCounter = (stepsCounter + 1) % options.step;
 
-      // Ask the player to render this frame
-      await page.evaluate('window.renderFrame(' + i + ')');
+      // Ask the player to render this frame (with timeout fallback)
+      if (i === 0 || i % 20 === 0) console.error('[render] Frame ' + i + '/' + frameCount);
+      await page.evaluate('Promise.race([window.renderFrame(' + i + '), new Promise(r => setTimeout(r, 2000))])');
 
       // Capture only the terminal element area — returns a Buffer
       var screenshot = await page.screenshot({
